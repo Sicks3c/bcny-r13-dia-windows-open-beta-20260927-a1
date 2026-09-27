@@ -86,14 +86,16 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
     for ($attempt = 0; $attempt -lt 20 -and -not $process; $attempt++) {
       Start-Sleep -Milliseconds 500
       $candidate = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.Equals($Executable, [StringComparison]::OrdinalIgnoreCase)
+        ($_.ExecutablePath -and $_.ExecutablePath.Equals($Executable, [StringComparison]::OrdinalIgnoreCase)) -or
+        $_.Name -ieq "agent-server.exe"
       } | Select-Object -First 1
       if ($candidate) { $process = [System.Diagnostics.Process]::GetProcessById([int]$candidate.ProcessId) }
       if ($job.State -eq "Failed") { break }
     }
     if (-not $process) {
-      $jobDetail = Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue | Out-String
-      throw "packaged AgentServer launch failed; job_state=$($job.State); detail=$jobDetail"
+      $jobErrors = @($job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { $_.ToString() } }) -join " | "
+      $jobReason = @($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason | ForEach-Object { $_.ToString() } }) -join " | "
+      throw "packaged AgentServer launch failed; job_state=$($job.State); errors=$jobErrors; reason=$jobReason"
     }
   }
   $serverProcesses.Add($process)
