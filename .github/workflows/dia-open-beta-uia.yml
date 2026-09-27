@@ -1,0 +1,25 @@
+name: dia-open-beta-uia
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  uia:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Map unsigned-in Dia UI Automation surface
+        shell: pwsh
+        run: ./run-dia-open-beta-uia.ps1
+      - name: Upload sanitized UIA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dia-open-beta-uia-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 1
