@@ -17,6 +17,7 @@ $result = [ordered]@{
   schema = "bcny-r13-dia-windows-open-beta-uia-v1"
   target = "TheBrowserCompany.Dia"
   requested_version = "0.28.0.380"
+  stage = "initialize"
   baseline = $null
   package = $null
   process_count = 0
@@ -40,6 +41,7 @@ function Download-Exact([string]$Url, [string]$Path, [string]$Expected) {
 }
 
 try {
+  $result.stage = "baseline"
   $baselineDia = @(Get-AppxPackage -Name "TheBrowserCompany.Dia" -ErrorAction SilentlyContinue)
   $baselineDependency = @(Get-AppxPackage -Name "Microsoft.VCLibs.140.00.UWPDesktop" -ErrorAction SilentlyContinue)
   $profileCandidates = @(
@@ -58,6 +60,7 @@ try {
 
   Download-Exact $msixUrl $msixPath $expectedMsix
   Download-Exact $dependencyUrl $dependencyPath $expectedDependency
+  $result.stage = "install"
   if ($baselineDependency.Count -eq 0) {
     Add-AppxPackage -Path $dependencyPath -ForceApplicationShutdown
     $installedDependencyByRun = $true
@@ -75,6 +78,7 @@ try {
   }
 
   $diaExe = Join-Path $diaInstallLocation "Dia.exe"
+  $result.stage = "launch"
   Start-Process -FilePath $diaExe | Out-Null
   Start-Sleep -Seconds 25
   $processes = @(Get-CimInstance Win32_Process | Where-Object {
@@ -94,6 +98,7 @@ try {
 
   Add-Type -AssemblyName UIAutomationClient
   Add-Type -AssemblyName UIAutomationTypes
+  $result.stage = "uia-enumeration"
   $nodes = New-Object System.Collections.Generic.List[object]
   $all = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
@@ -130,17 +135,24 @@ try {
     } catch {}
   }
   $named = @($nodes | Where-Object { $_.name -or $_.automation_id })
+  $result.stage = "uia-serialization"
   $result.uia = [ordered]@{
     scope = "exact installed-package process IDs; names and structural metadata only; no value reads or actions"
     node_count = $nodes.Count
     named_or_identified_count = $named.Count
     truncated = ($nodes.Count -ge 2000)
     process_ids = @($pids | Sort-Object -Unique)
-    nodes = @($nodes)
+    nodes = @($nodes | ForEach-Object { $_ })
   }
+  $result.stage = "complete"
 } catch {
   $failed = $true
-  $result.failure = [ordered]@{ type=$_.Exception.GetType().FullName; message=$_.Exception.Message }
+  $result.failure = [ordered]@{
+    type = $_.Exception.GetType().FullName
+    message = $_.Exception.Message
+    position = $_.InvocationInfo.PositionMessage
+    script_stack = $_.ScriptStackTrace
+  }
 } finally {
   if ($diaInstallLocation) {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
