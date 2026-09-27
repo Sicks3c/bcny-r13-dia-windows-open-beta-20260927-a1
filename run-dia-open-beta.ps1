@@ -39,6 +39,7 @@ $result = [ordered]@{
 }
 $failed = $false
 $diaPackage = $null
+$diaInstallLocation = $null
 $installedDependencyByRun = $false
 $dependencyInstalledFullName = $null
 $baselineProfile = @{}
@@ -112,9 +113,10 @@ try {
   Add-AppxPackage -Path $msixPath -DependencyPath $dependencyPath -ForceApplicationShutdown
   $diaPackage = Get-AppxPackage -Name "TheBrowserCompany.Dia" | Sort-Object Version -Descending | Select-Object -First 1
   if (-not $diaPackage) { throw "Dia package missing after Add-AppxPackage" }
+  $diaInstallLocation = [string]$diaPackage.InstallLocation
 
   $packageManifest = Get-AppxPackageManifest -Package $diaPackage.PackageFullName
-  $manifestPath = Join-Path $diaPackage.InstallLocation "AppxManifest.xml"
+  $manifestPath = Join-Path $diaInstallLocation "AppxManifest.xml"
   Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $evidence "installed-AppxManifest.xml")
   $extensions = @($packageManifest.Package.Applications.Application.Extensions.ChildNodes | ForEach-Object {
     [ordered]@{
@@ -135,7 +137,7 @@ try {
     full_name = $diaPackage.PackageFullName
     signature_kind = [string]$diaPackage.SignatureKind
     status = [string]$diaPackage.Status
-    install_location_leaf = Split-Path $diaPackage.InstallLocation -Leaf
+    install_location_leaf = Split-Path $diaInstallLocation -Leaf
   }
   $result.manifest = [ordered]@{
     executable = [string]$packageManifest.Package.Applications.Application.Executable
@@ -146,8 +148,8 @@ try {
     manifest_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
   }
 
-  $diaExe = Join-Path $diaPackage.InstallLocation "Dia.exe"
-  $arcCore = Join-Path $diaPackage.InstallLocation "ArcCore.dll"
+  $diaExe = Join-Path $diaInstallLocation "Dia.exe"
+  $arcCore = Join-Path $diaInstallLocation "ArcCore.dll"
   $result.signatures += Signature-Summary $diaExe "installed_Dia.exe"
   $result.signatures += Signature-Summary $arcCore "installed_ArcCore.dll"
   if (($result.signatures | Where-Object { $_.status -ne "Valid" }).Count -ne 0) {
@@ -157,7 +159,7 @@ try {
   $started = Start-Process -FilePath $diaExe -PassThru
   Start-Sleep -Seconds 20
   $allProcesses = @(Get-CimInstance Win32_Process)
-  $packageProcesses = @($allProcesses | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaPackage.InstallLocation, [StringComparison]::OrdinalIgnoreCase) })
+  $packageProcesses = @($allProcesses | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) })
   $packagePids = @($packageProcesses | ForEach-Object { [int]$_.ProcessId })
   $tcp = @()
   if ($packagePids.Count -gt 0) {
@@ -180,7 +182,7 @@ try {
         name = $_.Name
         pid = [int]$_.ProcessId
         parent_pid = [int]$_.ParentProcessId
-        executable_relative = $_.ExecutablePath.Substring($diaPackage.InstallLocation.Length).TrimStart('\')
+        executable_relative = $_.ExecutablePath.Substring($diaInstallLocation.Length).TrimStart('\')
       }
     })
     tcp_connection_count = $tcp.Count
@@ -188,16 +190,25 @@ try {
     process_still_running_after_20s = [bool](Get-Process -Id $started.Id -ErrorAction SilentlyContinue)
   }
 
-  $firewall = @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { $_.Program -and $_.Program.StartsWith($diaPackage.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { [ordered]@{ program_leaf=(Split-Path $_.Program -Leaf); instance_id=$_.InstanceID } })
-  $services = @(Get-CimInstance Win32_Service | Where-Object { ($_.PathName -and $_.PathName -like "*$($diaPackage.InstallLocation)*") -or $_.Name -like "*Dia*" } | ForEach-Object { [ordered]@{ name=$_.Name; start_mode=$_.StartMode; state=$_.State } })
-  $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like "*Dia*" -or $_.TaskPath -like "*Dia*" } | ForEach-Object { [ordered]@{ name=$_.TaskName; path=$_.TaskPath; state=[string]$_.State } })
+  $firewall = @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { $_.Program -and $_.Program.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { [ordered]@{ program_leaf=(Split-Path $_.Program -Leaf); instance_id=$_.InstanceID } })
+  $services = @(Get-CimInstance Win32_Service | Where-Object { $_.PathName -and $_.PathName.Contains($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { [ordered]@{ name=$_.Name; start_mode=$_.StartMode; state=$_.State } })
+  $tasks = @()
+  foreach ($task in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    $matchingActions = @($task.Actions | Where-Object {
+      ($_.Execute -and $_.Execute.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase)) -or
+      ($_.Arguments -and $_.Arguments.Contains($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase))
+    })
+    if ($matchingActions.Count -gt 0) {
+      $tasks += [ordered]@{ name=$task.TaskName; path=$task.TaskPath; state=[string]$task.State }
+    }
+  }
   $result.registrations = [ordered]@{
     firewall_application_filters = $firewall
     service_count = $services.Count
     services = $services
     scheduled_task_count = $tasks.Count
     scheduled_tasks = $tasks
-    install_acl_sddl = (Get-Acl -LiteralPath $diaPackage.InstallLocation).Sddl
+    install_acl_sddl = (Get-Acl -LiteralPath $diaInstallLocation).Sddl
   }
 }
 catch {
@@ -211,7 +222,7 @@ catch {
 finally {
   try {
     if ($diaPackage) {
-      Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaPackage.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
+      Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
       }
       Start-Sleep -Seconds 2
@@ -236,14 +247,23 @@ finally {
       }
     }
     $remainingCandidates = @($cleanupCandidates | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Split-Path $_ -Leaf })
+    $diaCountAfter = @(Get-AppxPackage -Name "TheBrowserCompany.Dia" -ErrorAction SilentlyContinue).Count
+    $dependencyCountAfter = @(Get-AppxPackage -Name "Microsoft.VCLibs.140.00.UWPDesktop" -ErrorAction SilentlyContinue).Count
+    $packageProcessCountAfter = if ($diaInstallLocation) { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) }).Count } else { 0 }
+    $firewallFilterCountAfter = if ($diaInstallLocation) { @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { $_.Program -and $_.Program.StartsWith($diaInstallLocation, [StringComparison]::OrdinalIgnoreCase) }).Count } else { 0 }
+    $dependencyBaselineCount = if ($result.baseline) { $result.baseline.dependency_package_count } else { $null }
+    $cleanupPassed = ($diaCountAfter -eq 0) -and ($packageProcessCountAfter -eq 0) -and ($remainingCandidates.Count -eq 0) -and ($dependencyCountAfter -eq $dependencyBaselineCount)
     $result.cleanup = [ordered]@{
-      dia_package_count_after = @(Get-AppxPackage -Name "TheBrowserCompany.Dia" -ErrorAction SilentlyContinue).Count
-      dependency_count_after = @(Get-AppxPackage -Name "Microsoft.VCLibs.140.00.UWPDesktop" -ErrorAction SilentlyContinue).Count
-      dependency_baseline_count = if ($result.baseline) { $result.baseline.dependency_package_count } else { $null }
-      package_process_count_after = if ($diaPackage) { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($diaPackage.InstallLocation, [StringComparison]::OrdinalIgnoreCase) }).Count } else { 0 }
+      dia_package_count_after = $diaCountAfter
+      dependency_count_after = $dependencyCountAfter
+      dependency_baseline_count = $dependencyBaselineCount
+      package_process_count_after = $packageProcessCountAfter
+      firewall_application_filter_count_after = $firewallFilterCountAfter
       residual_new_profile_candidate_count = $remainingCandidates.Count
       residual_new_profile_candidate_leaves = $remainingCandidates
+      cleanup_gate_passed = $cleanupPassed
     }
+    if (-not $cleanupPassed) { $failed = $true }
   }
   catch {
     $failed = $true
