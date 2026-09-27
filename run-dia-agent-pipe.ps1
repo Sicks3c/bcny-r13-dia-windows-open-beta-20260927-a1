@@ -37,6 +37,7 @@ $diaInstallLocation = $null
 $installedDependencyByRun = $false
 $dependencyInstalledFullName = $null
 $serverProcesses = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
+$serverJobs = New-Object System.Collections.Generic.List[object]
 $baselineProfile = @{}
 
 function Download-Exact([string]$Url, [string]$Path, [string]$Expected) {
@@ -62,13 +63,49 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
   $psi.Environment["SENTRY_DSN"] = ""
   $process = [System.Diagnostics.Process]::new()
   $process.StartInfo = $psi
-  if (-not $process.Start()) { throw "failed to start AgentServer" }
-  $process.BeginOutputReadLine()
-  $process.BeginErrorReadLine()
+  $launchMode = "direct"
+  $directLaunchError = $null
+  try {
+    if (-not $process.Start()) { throw "failed to start AgentServer" }
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+  } catch {
+    $directLaunchError = $_.Exception.Message
+    $launchMode = "Invoke-CommandInDesktopPackage-PreventBreakaway"
+    $job = Start-Job -ScriptBlock {
+      param($PackageFamilyName,$ApplicationId,$Command,$PipePath,$ToolSchemas)
+      $env:AGENT_SERVER_SOCKET_PATH = $PipePath
+      $env:AGENT_SERVER_PERSISTENT = "1"
+      $env:TOOL_SCHEMAS_DIR = $ToolSchemas
+      $env:SENTRY_DSN = ""
+      Import-Module Appx -ErrorAction Stop
+      Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -ApplicationId $ApplicationId -Command $Command -Args "" -PreventBreakaway
+    } -ArgumentList $diaPackage.PackageFamilyName,"Dia",$Executable,"\\.\pipe\$PipeLeaf",(Join-Path $WorkingDirectory "resources\tool-schemas")
+    $serverJobs.Add($job)
+    $process = $null
+    for ($attempt = 0; $attempt -lt 20 -and -not $process; $attempt++) {
+      Start-Sleep -Milliseconds 500
+      $candidate = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.Equals($Executable, [StringComparison]::OrdinalIgnoreCase)
+      } | Select-Object -First 1
+      if ($candidate) { $process = [System.Diagnostics.Process]::GetProcessById([int]$candidate.ProcessId) }
+      if ($job.State -eq "Failed") { break }
+    }
+    if (-not $process) {
+      $jobDetail = Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue | Out-String
+      throw "packaged AgentServer launch failed; job_state=$($job.State); detail=$jobDetail"
+    }
+  }
   $serverProcesses.Add($process)
   Start-Sleep -Seconds 2
   if ($process.HasExited) { throw "AgentServer exited early with code $($process.ExitCode)" }
-  return [ordered]@{ process=$process; stdout=$stdout; stderr=$stderr }
+  return [ordered]@{
+    process = $process
+    stdout = $stdout
+    stderr = $stderr
+    launch_mode = $launchMode
+    direct_launch_error = $directLaunchError
+  }
 }
 
 function Read-Line-With-Timeout([System.IO.StreamReader]$Reader, [int]$Milliseconds) {
@@ -195,6 +232,8 @@ try {
   $runLine = Read-Line-With-Timeout $reader 10000
   if ($runLine) { Set-Content -LiteralPath (Join-Path $evidence "medium-invalid-run-response.txt") -Value $runLine -Encoding utf8NoBOM }
   $result.medium_integrity = [ordered]@{
+    server_launch_mode = $mediumServer.launch_mode
+    direct_server_launch_error = $mediumServer.direct_launch_error
     connected = $mediumClient.IsConnected
     pipe_leaf_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($mediumLeaf))).ToLowerInvariant()
     security_descriptor_sddl = $aclSddl
@@ -246,6 +285,8 @@ if (-not $r.connected) { exit 2 }
   $psExecExit = $LASTEXITCODE
   $lowResult = if (Test-Path -LiteralPath $lowOutput) { Get-Content -Raw -LiteralPath $lowOutput | ConvertFrom-Json } else { $null }
   $result.low_integrity = [ordered]@{
+    server_launch_mode = $lowServer.launch_mode
+    direct_server_launch_error = $lowServer.direct_launch_error
     harness = "Microsoft-signed PsExec64 -l"
     psexec_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $psExec).Hash.ToLowerInvariant()
     psexec_signer_subject = $psExecSignature.SignerCertificate.Subject
@@ -270,6 +311,9 @@ if (-not $r.connected) { exit 2 }
 } finally {
   foreach ($server in $serverProcesses) {
     try { if (-not $server.HasExited) { $server.Kill($true); $server.WaitForExit(5000) | Out-Null } } catch {}
+  }
+  foreach ($job in $serverJobs) {
+    try { Stop-Job -Job $job -ErrorAction SilentlyContinue; Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
   }
   if ($diaInstallLocation) {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
