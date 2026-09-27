@@ -73,14 +73,22 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
     $directLaunchError = $_.Exception.Message
     $launchMode = "Invoke-CommandInDesktopPackage-PreventBreakaway"
     $job = Start-Job -ScriptBlock {
-      param($PackageFamilyName,$ApplicationId,$Command,$PipePath,$ToolSchemas)
+      param($PackageFamilyName,$ApplicationId,$Command,$PipePath,$WorkingDirectory,$ToolSchemas,$StdoutPath,$StderrPath,$ScratchRoot)
       $env:AGENT_SERVER_SOCKET_PATH = $PipePath
       $env:AGENT_SERVER_PERSISTENT = "1"
       $env:TOOL_SCHEMAS_DIR = $ToolSchemas
+      $env:HANDLERS_DATA_DIR = Join-Path $ScratchRoot "handlers"
+      $env:CONTEXTS_DATA_DIR = Join-Path $ScratchRoot "contexts"
+      $env:RUNNER_EXECUTABLE = Join-Path $WorkingDirectory "handler.exe"
+      $env:CLAUDE_CODE_EXECUTABLE = Join-Path $WorkingDirectory "claude.exe"
       $env:SENTRY_DSN = ""
       Import-Module Appx -ErrorAction Stop
-      Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -AppId $ApplicationId -Command $Command -Args "" -PreventBreakaway
-    } -ArgumentList $diaPackage.PackageFamilyName,"Dia",$Executable,"\\.\pipe\$PipeLeaf",(Join-Path $WorkingDirectory "resources\tool-schemas")
+      $q = [char]34
+      $cmdArgs = '/d /s /c ' + $q + $q + 'cd /d ' + $q + $WorkingDirectory + $q + ' && ' +
+        $q + $Command + $q + ' --agents-dir ' + $q + (Join-Path $WorkingDirectory "agents") + $q +
+        ' 1>' + $q + $StdoutPath + $q + ' 2>' + $q + $StderrPath + $q + $q
+      Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -AppId $ApplicationId -Command "cmd.exe" -Args $cmdArgs -PreventBreakaway
+    } -ArgumentList $diaPackage.PackageFamilyName,"Dia",$Executable,"\\.\pipe\$PipeLeaf",$WorkingDirectory,(Join-Path $WorkingDirectory "resources\tool-schemas"),$stdout,$stderr,$scratch
     $serverJobs.Add($job)
     $process = $null
     for ($attempt = 0; $attempt -lt 20 -and -not $process; $attempt++) {
@@ -95,7 +103,9 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
     if (-not $process) {
       $jobErrors = @($job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { if ($null -ne $_) { $_.ToString() } } }) -join " | "
       $jobReason = @($job.ChildJobs | ForEach-Object { if ($null -ne $_.JobStateInfo.Reason) { $_.JobStateInfo.Reason.ToString() } }) -join " | "
-      throw "packaged AgentServer launch failed; job_state=$($job.State); errors=$jobErrors; reason=$jobReason"
+      $stdoutText = if (Test-Path -LiteralPath $stdout) { (Get-Content -Raw -LiteralPath $stdout).Trim() } else { "<absent>" }
+      $stderrText = if (Test-Path -LiteralPath $stderr) { (Get-Content -Raw -LiteralPath $stderr).Trim() } else { "<absent>" }
+      throw "packaged AgentServer launch failed; job_state=$($job.State); errors=$jobErrors; reason=$jobReason; stdout=$stdoutText; stderr=$stderrText"
     }
   }
   $serverProcesses.Add($process)
