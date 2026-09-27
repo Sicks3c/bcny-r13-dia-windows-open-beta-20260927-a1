@@ -79,7 +79,7 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
       $env:TOOL_SCHEMAS_DIR = $ToolSchemas
       $env:SENTRY_DSN = ""
       Import-Module Appx -ErrorAction Stop
-      Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -ApplicationId $ApplicationId -Command $Command -Args "" -PreventBreakaway
+      Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -AppId $ApplicationId -Command $Command -Args "" -PreventBreakaway
     } -ArgumentList $diaPackage.PackageFamilyName,"Dia",$Executable,"\\.\pipe\$PipeLeaf",(Join-Path $WorkingDirectory "resources\tool-schemas")
     $serverJobs.Add($job)
     $process = $null
