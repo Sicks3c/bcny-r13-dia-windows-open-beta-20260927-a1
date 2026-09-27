@@ -93,8 +93,8 @@ function Start-AgentServer([string]$Executable, [string]$WorkingDirectory, [stri
       if ($job.State -eq "Failed") { break }
     }
     if (-not $process) {
-      $jobErrors = @($job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { $_.ToString() } }) -join " | "
-      $jobReason = @($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason | ForEach-Object { $_.ToString() } }) -join " | "
+      $jobErrors = @($job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { if ($null -ne $_) { $_.ToString() } } }) -join " | "
+      $jobReason = @($job.ChildJobs | ForEach-Object { if ($null -ne $_.JobStateInfo.Reason) { $_.JobStateInfo.Reason.ToString() } }) -join " | "
       throw "packaged AgentServer launch failed; job_state=$($job.State); errors=$jobErrors; reason=$jobReason"
     }
   }
