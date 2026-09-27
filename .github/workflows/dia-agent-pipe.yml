@@ -1,0 +1,25 @@
+name: dia-agent-pipe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pipe:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test packaged AgentServer named-pipe reachability
+        shell: pwsh
+        run: ./run-dia-agent-pipe.ps1
+      - name: Upload sanitized pipe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dia-agent-pipe-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 1
