@@ -1,0 +1,25 @@
+name: dia-open-beta-runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, launch, observe, and remove official Dia Open Beta
+        shell: pwsh
+        run: ./run-dia-open-beta.ps1
+      - name: Upload sanitized runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dia-open-beta-runtime-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 1
